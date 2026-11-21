@@ -1,0 +1,7 @@
+# Let non-root users open the Neuropixels OneBox (FTDI FT601, USB 0403:601f) through
+# FTDI's Linux libftd3xx. Install:
+#   sudo cp udev/60-neuropixels-onebox.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=usb
+# MODE 0666 opens it to every local user; for a shared machine use
+#   MODE="0660", GROUP="plugdev"   (and add the users to that group).
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="601f", MODE="0666"

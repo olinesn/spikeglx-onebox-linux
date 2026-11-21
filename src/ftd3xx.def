@@ -1,0 +1,52 @@
+; Export ordinals copied from FTDI's FTD3XX.dll 1.3.0.10 (the copy SpikeGLX
+; v20261020-api4 ships). imec's NeuropixAPI_x64_4_1_3.dll imports FTD3XX by
+; ordinal, so these numbers must not change.
+LIBRARY FTD3XX.dll
+EXPORTS
+    FT_Close                        @2
+    FT_ListDevices                  @28
+    FT_GetDeviceInfo                @61
+    FT_CreateDeviceInfoList         @70
+    FT_GetDeviceInfoList            @71
+    FT_GetDeviceInfoDetail          @72
+    FT_GetDriverVersion             @75
+    FT_GetLibraryVersion            @76
+    FT_Create                       @93
+    FT_GetVIDPID                    @94
+    FT_WritePipe                    @95
+    FT_ReadPipe                     @96
+    FT_GetOverlappedResult          @97
+    FT_SetStreamPipe                @98
+    FT_ClearStreamPipe              @99
+    FT_FlushPipe                    @100
+    FT_AbortPipe                    @101
+    FT_GetDeviceDescriptor          @102
+    FT_GetConfigurationDescriptor   @103
+    FT_GetInterfaceDescriptor       @104
+    FT_GetPipeInformation           @105
+    FT_GetStringDescriptor          @106
+    FT_GetDescriptor                @107
+    FT_ControlTransfer              @108
+    FT_SetGPIO                      @109
+    FT_GetGPIO                      @110
+    FT_SetNotificationCallback      @111
+    FT_ClearNotificationCallback    @112
+    FT_GetChipConfiguration         @113
+    FT_SetChipConfiguration         @114
+    FT_GetFirmwareVersion           @115
+    FT_InitializeOverlapped         @116
+    FT_ReleaseOverlapped            @117
+    FT_ResetDevicePort              @119
+    FT_CycleDevicePort              @120
+    FT_IsDevicePath                 @121
+    FT_SetPipeTimeout               @123
+    FT_GetPipeTimeout               @124
+    FT_SetSuspendTimeout            @125
+    FT_GetSuspendTimeout            @126
+    FT_EnableGPIO                   @127
+    FT_WriteGPIO                    @128
+    FT_ReadGPIO                     @129
+    FT_SetGPIOPull                  @130
+    FT_SetGPIOLevel                 @131
+    FT_WritePipeEx                  @132
+    FT_ReadPipeEx                   @133
