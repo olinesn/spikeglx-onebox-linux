@@ -9,8 +9,8 @@ Windows SpikeGLX under [Wine](https://www.winehq.org/), and replaces one Windows
 On Arm, [Box64](https://github.com/ptitSeb/box64) runs the x86-64 code.
 
 > **Status: experimental, not supported by imec, HHMI/Janelia (SpikeGLX) or FTDI.**
-> It recorded real data on two machines (below). Don't rely on it for experiments
-> before you have run your own long recordings and checked them.
+> It recorded real data on two machines (below), but **a 2-hour test stopped streaming after
+> 18 minutes** (see [Known problems](#known-problems)). Don't use it for real recordings yet.
 
 ## What was tested (2026-11-20)
 
@@ -25,9 +25,10 @@ On Arm, [Box64](https://github.com/ptitSeb/box64) runs the x86-64 code.
 | Stream | 30,001 samples/s over 10 s; 2 min 10 s run, no errors | 30,014 samples/s over 31 s |
 | Recording | 30.7 s `.ap.bin`/`.meta`: size = samples × 385 channels × 2 bytes exactly, all 384 channels live, no zero rows | 30.8 s, same checks |
 | SpikeGLX CPU (graphs on) | 10–20 % of one core | 50–70 % of one core |
+| 2-hour test | not run | **failed:** streaming stopped after 18 min 20 s ([Known problems](#known-problems)) |
 
-Not tested yet: recordings of hours, two probes, the OneBox's own analog/digital channels, and
-the sync input. PXI basestations are **not** covered (they need a Windows PCIe kernel driver).
+Not tested yet: two probes, the OneBox's own analog/digital channels, and the sync input.
+PXI basestations are **not** covered (they need a Windows PCIe kernel driver).
 
 ## How it works
 
@@ -115,6 +116,24 @@ needs it, `BOX64_X64LIB=/path/to/box64/x64lib`). Everything else is the same, wi
 x86-64 files. In our test SpikeGLX used 50–70 % of a Cortex-A78AE core, against 10–20 % of a
 Zen 5 core on x86-64. Your kernel needs 4 KiB memory pages for Wine (the Jetson's default; a
 Raspberry Pi 5's default 16 KiB pages are not).
+
+## Known problems
+
+**Streaming stops after about 18 minutes** (2-hour test on the Arm machine, 2026-11-20).
+- The stream ran at exactly 30,000 samples/s for 18 min 20 s.
+- Then FTDI's Linux library returned -1 (not a valid FTDI status) from `FT_GetOverlappedResult`,
+  and imec's API shut the data pipe down.
+- SpikeGLX kept reporting "running" and "saving", but the sample count and the file stopped growing.
+- The kernel logged no USB error.
+
+**Memory grows while streaming,** by about 128 MB a minute (2 MB/s), on both machines, so not
+because of Box64. It stops growing when the stream stops, and is probably related.
+- The bridge allocates nothing per transfer.
+- The likely place is FTDI's asynchronous read path, which imec's API uses for the data stream
+  (FTDI notes that asynchronous calls aren't needed on Linux). Not confirmed yet.
+
+Until this is fixed, keep recordings to a few minutes, and watch the stream's sample count (for
+example `python3 tools/sglx_cmd.py "GETSTREAMSAMPLECOUNT 2 0"`).
 
 ## Troubleshooting
 
