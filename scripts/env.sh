@@ -9,8 +9,10 @@
 export WINEPREFIX=${WINEPREFIX:-$HOME/.wine-spikeglx}
 export WINEDEBUG=${WINEDEBUG:-err+all,fixme-all}
 # ftd3xx=b: use the shim (Wine builtin) instead of the FTD3XX.dll shipped beside SpikeGLX.
+# wineusb.sys=d: Wine's own USB driver must not open the OneBox (it can grab it first, and
+#   FTDI's library then can't open it: "Can't find FTDI driver: Check OneBox power").
 # mscoree,mshtml=: don't offer to install Mono / Gecko when the prefix is created.
-export WINEDLLOVERRIDES="ftd3xx=b;mscoree,mshtml="
+export WINEDLLOVERRIDES="ftd3xx=b;wineusb.sys=d;mscoree,mshtml="
 # imec's API requires FTDI driver >= 1.3.10 and reads this number in its own way:
 # 0x01030010 reads as 1.3.10 (0x0103000A would read as 1.3.4). See README.
 export FTD3XX_SHIM_DRIVER_VERSION=${FTD3XX_SHIM_DRIVER_VERSION:-0x01030010}

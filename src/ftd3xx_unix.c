@@ -14,12 +14,24 @@
  * - Status codes are Windows' numbers except 11/12: from libftd3xx 1.1.0 they
  *   mean "memory insufficient"/"overflow" (Windows: EEPROM errors), so they
  *   go back as FT_INSUFFICIENT_RESOURCES (5) / FT_IO_ERROR (4).
+ * - libftd3xx 1.1.5+ (tested: 1.1.8): a blocking FT_ReadPipe that gets a short
+ *   packet waits for the full length and returns FT_TIMEOUT; Windows returns the
+ *   short packet at once, which imec's register reads rely on. With 1.1.5+ the
+ *   shim serves blocking reads with FT_ReadPipeAsync + FT_GetOverlappedResult,
+ *   which return short packets at once, and sets fStopReadingOnURBUnderrun.
+ * Use libftd3xx 1.1.8 or newer: 1.1.0 leaks ~260 B per asynchronous read and
+ * after 5-18 min returns -1 from FT_GetOverlappedResult, which stops the stream.
  *
  * Environment:
  *   FTD3XX_SHIM_LOG=stderr|<path>   log every call (the busy read/write path:
  *                                   the first 50, then each failure)
  *   FTD3XX_SHIM_DRIVER_VERSION=0x.. value FT_GetDriverVersion reports
  *   FTD3XX_SHIM_LIBRARY_VERSION=0x.. value FT_GetLibraryVersion reports
+ *   FTD3XX_SHIM_STATS=<seconds>     (with FTD3XX_SHIM_LOG) a line of transfer
+ *                                   counters, heap and RSS every <seconds>
+ *   FTD3XX_SHIM_SYNC_VIA_ASYNC=0|1  blocking reads via asynchronous reads
+ *                                   (default: 1 with libftd3xx 1.1.5+)
+ *   FTD3XX_SHIM_STOP_ON_UNDERRUN=0|1 fStopReadingOnURBUnderrun (same default)
  */
 #include <stdint.h>
 #include <dirent.h>
@@ -28,6 +40,10 @@
 #include <string.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <malloc.h>
+#include <time.h>
+#include <unistd.h>
+#include <dlfcn.h>
 
 #include "ftd3xx.h"          /* FTDI's Linux header (with its Windows-style types) */
 #include "ftd3xx_shim.h"
@@ -65,6 +81,57 @@ static int log_on(void)
 /* read/write/overlapped-result run thousands of times a second */
 #define LOG_BUSY(st, ...) do { unsigned n_ = atomic_fetch_add(&busy_calls, 1); \
     if (n_ < 50 || ((st) != FT_OK && (st) != FT_IO_PENDING)) LOG(__VA_ARGS__); } while (0)
+
+/* ------------------------------------------------------------ statistics */
+
+/* FTD3XX_SHIM_STATS=<seconds> (with FTD3XX_SHIM_LOG set): every <seconds>, one log line with
+ * the transfer counters, glibc's heap in use (libftd3xx, libusb and this file allocate there;
+ * Wine's Windows heaps, used by imec's API and SpikeGLX, don't) and the process RSS. A leak in
+ * libftd3xx shows in heap_used; one on the Windows side only in rss. */
+static atomic_ulong st_async_rd, st_async_wr, st_sync_rd, st_sync_wr;
+static atomic_ulong st_results, st_result_bytes, st_result_fail, st_ov_init, st_ov_release, st_ticks;
+static double st_every = -1, st_t0, st_last;
+static pthread_mutex_t st_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static double now_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static long rss_kb(void)
+{
+    long size = 0, rss = 0;
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (f) { if (fscanf(f, "%ld %ld", &size, &rss) != 2) rss = 0; fclose(f); }
+    return rss * (sysconf(_SC_PAGESIZE) / 1024);
+}
+
+static void stats_tick(void)
+{
+    if (st_every == 0) return;
+    if (atomic_fetch_add(&st_ticks, 1) & 255) return;          /* look at the clock every 256 calls */
+    pthread_mutex_lock(&st_lock);
+    if (st_every < 0) {
+        const char *v = getenv("FTD3XX_SHIM_STATS");
+        st_every = (v && *v && log_on()) ? atof(v) : 0;
+        if (st_every < 0) st_every = 0;
+        st_t0 = st_last = now_s();
+    }
+    double t = now_s();
+    if (st_every > 0 && t - st_last >= st_every) {
+        st_last = t;
+        struct mallinfo2 m = mallinfo2();
+        LOG("stats t=%.1f async_rd=%lu async_wr=%lu sync_rd=%lu sync_wr=%lu results=%lu result_MB=%.1f "
+            "result_fail=%lu ov_init=%lu ov_release=%lu heap_used_kB=%zu heap_mmap_kB=%zu rss_kB=%ld",
+            t - st_t0, (unsigned long)st_async_rd, (unsigned long)st_async_wr, (unsigned long)st_sync_rd,
+            (unsigned long)st_sync_wr, (unsigned long)st_results, st_result_bytes / 1e6,
+            (unsigned long)st_result_fail, (unsigned long)st_ov_init, (unsigned long)st_ov_release,
+            m.uordblks / 1024, m.hblkhd / 1024, rss_kb());
+    }
+    pthread_mutex_unlock(&st_lock);
+}
 
 /* ------------------------------------------------------ OVERLAPPED table */
 
@@ -148,11 +215,49 @@ static unsigned env_hex(const char *name, int *set)
     return *set ? (unsigned)strtoul(v, NULL, 0) : 0;
 }
 
+/* ------------------------------------------------- transfer parameters */
+
+/* libftd3xx 1.1.5+ (seen with 1.1.8): a blocking FT_ReadPipe of 2,048 B that gets a 48 B short
+ * packet waits for the rest and returns FT_TIMEOUT; Windows (and libftd3xx 1.1.0) return the 48 B
+ * at once, which imec's register reads rely on. So with 1.1.5+ blocking reads go through an
+ * asynchronous read, which returns short packets at once (sync_via_async), and
+ * fStopReadingOnURBUnderrun is set for FIFO 0-3. Set once, before the first FT_Create (it is
+ * refused while a device is open); zeros elsewhere keep the library's defaults. 1.1.5+ is
+ * recognised by FT_GetTransferParams; FTD3XX_SHIM_SYNC_VIA_ASYNC / _STOP_ON_UNDERRUN=0|1 override. */
+static pthread_once_t params_once = PTHREAD_ONCE_INIT;
+static int sync_via_async;
+
+static void set_transfer_params(void)
+{
+    typedef FT_STATUS (*get_params_t)(FT_TRANSFER_CONF *, DWORD);
+    /* libftd3xx is loaded privately under Wine: ask it, not the global scope */
+    void *lib = dlopen("libftd3xx.so", RTLD_LAZY | RTLD_NOLOAD);
+    get_params_t get = (get_params_t)dlsym(lib ? lib : RTLD_DEFAULT, "FT_GetTransferParams");
+    const char *sv = getenv("FTD3XX_SHIM_SYNC_VIA_ASYNC");
+    sync_via_async = sv && *sv ? atoi(sv) != 0 : get != NULL;
+    LOG("synchronous reads: %s", sync_via_async ? "asynchronous read + FT_GetOverlappedResult" : "FT_ReadPipe");
+    const char *v = getenv("FTD3XX_SHIM_STOP_ON_UNDERRUN");
+    int on = v && *v ? atoi(v) != 0 : get != NULL;
+    if (!on) LOG("transfer parameters: library defaults (stop on URB underrun off)");
+    else for (DWORD fifo = 0; fifo < 4; fifo++) {
+        FT_TRANSFER_CONF c;
+        memset(&c, 0, sizeof(c));
+        c.wStructSize = sizeof(c);
+        if (get) get(&c, fifo);               /* start from what is in effect */
+        c.wStructSize = sizeof(c);
+        c.fStopReadingOnURBUnderrun = TRUE;
+        FT_STATUS st = FT_SetTransferParams(&c, fifo);
+        LOG("FT_SetTransferParams(FIFO %u, stop on URB underrun) = %u", fifo, st);
+    }
+    if (lib) dlclose(lib);
+}
+
 /* ------------------------------------------------------------- the calls */
 
 static shim_ntstatus u_create(void *p)
 {
     struct shim_args *a = p;
+    pthread_once(&params_once, set_transfer_params);
     a->status = FT_Create(a->p1, a->u1, (FT_HANDLE *)a->p2);
     if (a->u1 & FT_OPEN_BY_INDEX)
         LOG("FT_Create(index %lu, flags 0x%x) = %u, handle %p", (unsigned long)(uintptr_t)a->p1, a->u1, a->status,
@@ -177,8 +282,24 @@ static shim_ntstatus rw(struct shim_args *a, int write)
     ULONG *done = a->p2;
     if (!a->p3) {
         unsigned ms = timeout_get(a->h, a->u1);
+        if (!write && sync_via_async) {           /* 1.1.5+: a short packet must end the read */
+            OVERLAPPED ov;
+            ULONG n = 0;
+            memset(&ov, 0, sizeof(ov));
+            FT_STATUS st = FT_InitializeOverlapped(a->h, &ov);
+            if (st == FT_OK) {
+                FT_SetPipeTimeout(a->h, (UCHAR)a->u1, ms == 0xFFFFFFFFu ? 0 : ms);   /* 1.1.7+: 0 = no timeout */
+                st = FT_ReadPipeAsync(a->h, fifo_of(a->u1), a->p1, a->u2, &n, &ov);
+                if (st == FT_IO_PENDING || st == FT_OK) st = FT_GetOverlappedResult(a->h, &ov, &n, TRUE);
+                FT_ReleaseOverlapped(a->h, &ov);
+            }
+            a->status = st;
+            if (done) *done = n;
+        } else
         a->status = write ? FT_WritePipe(a->h, (UCHAR)a->u1, a->p1, a->u2, done, ms)
                           : FT_ReadPipe(a->h, (UCHAR)a->u1, a->p1, a->u2, done, ms);
+        atomic_fetch_add(write ? &st_sync_wr : &st_sync_rd, 1);
+        stats_tick();
         LOG_BUSY(a->status, "FT_%sPipe(%p, 0x%02x, %u bytes, sync %u ms) = %u, done %u", write ? "Write" : "Read",
                  a->h, a->u1, a->u2, ms, a->status, done ? *done : 0);
         return 0;
@@ -191,6 +312,8 @@ static shim_ntstatus rw(struct shim_args *a, int write)
     }
     a->status = write ? FT_WritePipeAsync(a->h, fifo_of(a->u1), a->p1, a->u2, done, lin)
                       : FT_ReadPipeAsync(a->h, fifo_of(a->u1), a->p1, a->u2, done, lin);
+    atomic_fetch_add(write ? &st_async_wr : &st_async_rd, 1);
+    stats_tick();
     LOG_BUSY(a->status, "FT_%sPipe(%p, 0x%02x -> FIFO %u, %u bytes, async ov %p) = %u", write ? "Write" : "Read",
              a->h, a->u1, fifo_of(a->u1), a->u2, a->p3, a->status);
     return 0;
@@ -317,6 +440,10 @@ static shim_ntstatus u_get_overlapped_result(void *p)
     OVERLAPPED *lin = ov_find(a->p1);
     if (!lin) { a->status = FT_INVALID_PARAMETER; LOG("FT_GetOverlappedResult: unknown OVERLAPPED %p", a->p1); return 0; }
     a->status = FT_GetOverlappedResult(a->h, lin, (ULONG *)a->p2, (BOOL)a->u1);
+    atomic_fetch_add(&st_results, 1);
+    if (a->status == FT_OK && a->p2) atomic_fetch_add(&st_result_bytes, *(ULONG *)a->p2);
+    else if (a->status != FT_IO_PENDING && a->status != FT_IO_INCOMPLETE) atomic_fetch_add(&st_result_fail, 1);
+    stats_tick();
     LOG_BUSY(a->status, "FT_GetOverlappedResult(%p, ov %p, wait %u) = %u, done %u", a->h, a->p1, a->u1, a->status,
              a->p2 ? *(ULONG *)a->p2 : 0);
     return 0;
@@ -328,6 +455,7 @@ static shim_ntstatus u_init_overlapped(void *p)
     OVERLAPPED *lin = calloc(1, sizeof(*lin));
     if (!lin) { a->status = FT_INSUFFICIENT_RESOURCES; return 0; }
     a->status = FT_InitializeOverlapped(a->h, lin);
+    atomic_fetch_add(&st_ov_init, 1);
     if (a->status == FT_OK && !ov_add(a->p1, a->h, lin)) {
         FT_ReleaseOverlapped(a->h, lin);
         a->status = FT_INSUFFICIENT_RESOURCES;
@@ -343,6 +471,7 @@ static shim_ntstatus u_release_overlapped(void *p)
     OVERLAPPED *lin = ov_remove(a->p1);
     if (!lin) { a->status = FT_INVALID_PARAMETER; LOG("FT_ReleaseOverlapped: unknown OVERLAPPED %p", a->p1); return 0; }
     a->status = FT_ReleaseOverlapped(a->h, lin);
+    atomic_fetch_add(&st_ov_release, 1);
     free(lin);
     LOG("FT_ReleaseOverlapped(%p, ov %p) = %u", a->h, a->p1, a->status);
     return 0;

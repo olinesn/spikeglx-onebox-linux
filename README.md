@@ -9,10 +9,11 @@ Windows SpikeGLX under [Wine](https://www.winehq.org/), and replaces one Windows
 On Arm, [Box64](https://github.com/ptitSeb/box64) runs the x86-64 code.
 
 > **Status: experimental, not supported by imec, HHMI/Janelia (SpikeGLX) or FTDI.**
-> It recorded real data on two machines (below), but **a 2-hour test stopped streaming after
-> 18 minutes** (see [Known problems](#known-problems)). Don't use it for real recordings yet.
+> It recorded 2 hours without a problem on an Arm machine with **FTDI's library 1.1.8**
+> (below). With FTDI's 1.1.0, streaming stops after a few minutes
+> ([Known problems](#known-problems)). Test it on your own setup before you rely on it.
 
-## What was tested (2026-11-20)
+## What was tested (2026-11-20 and 21)
 
 | | x86-64 | Arm |
 |---|---|---|
@@ -20,13 +21,16 @@ On Arm, [Box64](https://github.com/ptitSeb/box64) runs the x86-64 code.
 | OS | Ubuntu 24.04, kernel 7.0 | Ubuntu 24.04 (L4T R39.2), kernel 6.8-tegra |
 | Wine | WineHQ 11.0 stable (unpacked, no root) | same, under Box64 |
 | SpikeGLX | v20261020 (API4), imec API 4.1.3, `SpikeGLX_NISIM.exe` | same |
-| FTDI library | D3XX for Linux 1.1.0, x86-64 | same x86-64 file (it runs inside the emulated process) |
+| FTDI library | D3XX for Linux 1.1.0, x86-64 | **1.1.8**, x86-64 (it runs inside the emulated process); earlier 1.1.0 |
 | Hardware | OneBox (NPOB_ACQ_00-05-04, firmware 4.0.240), headstage NPM_HS_31, probe NP2013 (NP 2.0, four shanks) | same OneBox, behind a USB 3 hub |
-| Stream | 30,001 samples/s over 10 s; 2 min 10 s run, no errors | 30,014 samples/s over 31 s |
-| Recording | 30.7 s `.ap.bin`/`.meta`: size = samples × 385 channels × 2 bytes exactly, all 384 channels live, no zero rows | 30.8 s, same checks |
+| Stream | 30,001 samples/s over 10 s; 2 min 10 s run, no errors | **30,000 samples/s for 2 hours** (every 10-minute reading 29,990–30,008) |
+| Recording | 30.7 s `.ap.bin`/`.meta`: size = samples × 385 channels × 2 bytes exactly, all 384 channels live, no zero rows | **2 h 0 min 17 s** (167 GB): size = 216,498,633 samples × 385 × 2 bytes exactly; all 384 channels live at the start, middle and end; no zero rows in a sample of 1 row every 0.1 s |
+| Memory over 2 hours | not run | FTDI's library: 15 MB, flat. SpikeGLX: 1.06–1.11 GB |
 | SpikeGLX CPU (graphs on) | 10–20 % of one core | 50–70 % of one core |
-| 2-hour test | not run | **failed:** streaming stopped after 18 min 20 s ([Known problems](#known-problems)) |
 
+The 2-hour run used our lab copy of the bridge (the same transfer path, plus experimental modes
+left out here). This repository's own build then recorded 3 minutes on the Arm machine with the
+same checks. On x86-64 the bridge builds against 1.1.8, but has not yet run with it on the OneBox.
 Not tested yet: two probes, the OneBox's own analog/digital channels, and the sync input.
 PXI basestations are **not** covered (they need a Windows PCIe kernel driver).
 
@@ -55,6 +59,12 @@ same behaviour, and imec's code depends on some of the differences. The bridge h
   bridge reports the value in `FTD3XX_SHIM_DRIVER_VERSION` (the scripts set `0x01030010`).
   *We don't know which Windows driver fix imec's minimum stands for, or whether FTDI's Linux
   library has the equivalent.*
+- **Short reads (FTDI 1.1.5 and newer):** a blocking `FT_ReadPipe` that receives a short
+  packet waits for the full length and then returns `FT_TIMEOUT`. On Windows it returns the
+  short packet at once, and imec's register reads depend on that (unbridged, Detect fails with
+  `USB IO error: 19`). With these versions the bridge serves blocking reads with an asynchronous
+  read and waits for it, which returns short packets at once. It also sets FTDI's
+  `fStopReadingOnURBUnderrun`.
 - **Timeouts:** a pipe timeout of 0 means "wait forever" on Windows and "don't wait" on Linux.
 - **Asynchronous reads:** Windows passes an `OVERLAPPED` structure and a pipe ID; Linux has
   separate async calls that take a FIFO number and a differently sized `OVERLAPPED`.
@@ -72,9 +82,9 @@ You need an x86-64 Linux machine to **build** (on Arm, build on an x86-64 machin
    Use a private Wine tree for this, because `make install` copies files into it.
 2. **Compilers:** `gcc` and mingw-w64 (`x86_64-w64-mingw32-gcc`, Ubuntu package
    `gcc-mingw-w64-x86-64`).
-3. **FTDI D3XX for Linux, x86-64** (version 1.1.0 tested) from FTDI's D3XX drivers page.
-   Unpack it; the folder with `ftd3xx.h` and `libftd3xx.so` is `FTDI` below. Use the x86-64
-   package on Arm too.
+3. **FTDI D3XX for Linux, x86-64, version 1.1.8 or newer** (1.1.8 tested) from FTDI's D3XX
+   drivers page. Not 1.1.0: see [Known problems](#known-problems). Unpack it; the folder with
+   `ftd3xx.h` and `libftd3xx.so` is `FTDI` below. Use the x86-64 package on Arm too.
 4. **SpikeGLX API4 release** from the [SpikeGLX download page](https://billkarsh.github.io/SpikeGLX/).
    Unzip it to a writable folder. It brings imec's API DLLs.
 5. **Build and install:**
@@ -105,8 +115,17 @@ You need an x86-64 Linux machine to **build** (on Arm, build on an x86-64 machin
      instead (the data are then uncalibrated).
    - SpikeGLX's command server (Options ▸ Command Server Settings) works as on Windows;
      `tools/sglx_cmd.py` sends commands to it from Linux, e.g. `python3 tools/sglx_cmd.py
-     ISRUNNING "GETSTREAMSAMPLECOUNT 2 0"`. Note that `STARTRUN` only works after the run
-     settings have been checked once in the Configure dialog.
+     ISRUNNING "GETSTREAMSAMPLECOUNT 2 0"`.
+   - **Without the Configure dialog** (e.g. over ssh), once the slots are configured:
+     ```bash
+     SGLX_TIMEOUT=240 python3 tools/sglx_cmd.py "SELECTDEVS 1 (20,1,1)"   # Detect + check settings
+     python3 tools/sglx_cmd.py "SETRUNNAME myrun" STARTRUN "SETRECORDENAB 1"
+     python3 tools/sglx_cmd.py "SETRECORDENAB 0" STOPRUN
+     ```
+     `(20,1,1)` is slot 20, port 1, dock 1. Under Box64, Detect takes a few minutes: raise the
+     command server's timeout to 60000 ms too (`timeoutMS` in `_Configs/mainapp.ini`). The
+     check fails with "Run name already in use" when the run name in `_Configs/daq.ini`
+     (`snsRunName`) already has a folder in the data directory; change it there first.
 
 ### Arm (Box64)
 
@@ -119,21 +138,22 @@ Raspberry Pi 5's default 16 KiB pages are not).
 
 ## Known problems
 
-**Streaming stops after about 18 minutes** (2-hour test on the Arm machine, 2026-11-20).
-- The stream ran at exactly 30,000 samples/s for 18 min 20 s.
-- Then FTDI's Linux library returned -1 (not a valid FTDI status) from `FT_GetOverlappedResult`,
-  and imec's API shut the data pipe down.
-- SpikeGLX kept reporting "running" and "saving", but the sample count and the file stopped growing.
-- The kernel logged no USB error.
+**FTDI's library 1.1.0 can't stream for long: use 1.1.8 or newer.** With 1.1.0
+(tests of 2026-11-20):
+- **Streaming stopped** after 18, 5 and 7 minutes in three tests. FTDI's library returned -1
+  (not a valid FTDI status) from `FT_GetOverlappedResult`, and imec's API shut the data pipe
+  down. SpikeGLX kept reporting "running" and "saving", but the sample count and the file
+  stopped growing. The kernel logged no USB error.
+- **Memory grew** by about 2 MB/s on both machines: the library kept about 260 bytes per
+  asynchronous read, and the OneBox stream makes about 8,300 of them a second.
+- FTDI's release notes list fixes for both: an asynchronous-read leak (1.1.6), and
+  asynchronous timeouts and blocking between control and data transfers (1.1.5 and 1.1.7).
+- Workarounds in the bridge didn't help. Serving the data stream with blocking reads instead
+  broke imec's register reads.
 
-**Memory grows while streaming,** by about 128 MB a minute (2 MB/s), on both machines, so not
-because of Box64. It stops growing when the stream stops, and is probably related.
-- The bridge allocates nothing per transfer.
-- The likely place is FTDI's asynchronous read path, which imec's API uses for the data stream
-  (FTDI notes that asynchronous calls aren't needed on Linux). Not confirmed yet.
-
-Until this is fixed, keep recordings to a few minutes, and watch the stream's sample count (for
-example `python3 tools/sglx_cmd.py "GETSTREAMSAMPLECOUNT 2 0"`).
+With 1.1.8 the 2-hour recording above had none of this. One run is not proof, though: on long
+recordings, watch the stream's sample count (for example
+`python3 tools/sglx_cmd.py "GETSTREAMSAMPLECOUNT 2 0"`).
 
 ## Troubleshooting
 
@@ -141,6 +161,15 @@ example `python3 tools/sglx_cmd.py "GETSTREAMSAMPLECOUNT 2 0"`).
   then only failures.
 - `getDeviceList: 0` with the OneBox plugged in: check `lsusb -t` shows it at 5000M, the udev
   rule, and that `WINEDLLOVERRIDES` contains `ftd3xx=b` (`scripts/env.sh` sets it).
+- **"Can't find FTDI driver: Check OneBox power"** with the OneBox on: Wine's own USB driver
+  may have opened the OneBox first. `scripts/env.sh` turns it off (`wineusb.sys=d` in
+  `WINEDLLOVERRIDES`).
+- If it still happens, or `FTD3XX_SHIM_LOG` lists the OneBox with an empty serial
+  (`serial "" desc ""`), the OneBox's USB link is stuck. That can happen after SpikeGLX was
+  killed during a transfer. Close SpikeGLX and run `python3 tools/onebox_reset.py`, which resets
+  the link as unplugging and replugging would.
+- `FTD3XX_SHIM_STATS=60` (with `FTD3XX_SHIM_LOG`) logs a line of transfer counters, the FTDI
+  library's heap and the process memory every 60 s.
 - One `FT_GetOverlappedResult ... = 19` (timeout) during Detect is normal; it happens before the run.
 - `make fake` builds a stand-in `libftd3xx.so` that reports no devices, to test the Wine side
   without FTDI's library.

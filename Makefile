@@ -15,11 +15,13 @@ FTDI  ?=
 MINGW ?= x86_64-w64-mingw32-gcc
 CC    ?= gcc
 
+ifneq ($(MAKECMDGOALS),clean)
 ifeq ($(strip $(WINE)),)
 $(error set WINE=<Wine 11 install tree>, e.g. WINE=$$HOME/wine11/opt/wine-stable)
 endif
 ifeq ($(strip $(FTDI)),)
-$(error set FTDI=<unpacked FTDI D3XX for Linux, x86-64>, e.g. FTDI=$$HOME/ftdi/linux-x86_64)
+$(error set FTDI=<unpacked FTDI D3XX for Linux 1.1.8+, x86-64>, e.g. FTDI=$$HOME/ftdi/linux-x86_64)
+endif
 endif
 
 BUILD := build
@@ -37,7 +39,7 @@ $(BUILD)/ftd3xx.dll: src/ftd3xx_pe.c src/ftd3xx.def src/ftd3xx_shim.h | $(BUILD)
 
 # Linux half: finds libftd3xx.so in its own directory ($ORIGIN).
 $(BUILD)/ftd3xx.so: src/ftd3xx_unix.c src/ftd3xx_shim.h | $(BUILD)
-	$(CC) -O2 -Wall -fPIC -shared -o $@ src/ftd3xx_unix.c -I$(FTDI) -L$(FTDI) -lftd3xx -lpthread '-Wl,-rpath,$$ORIGIN'
+	$(CC) -O2 -Wall -fPIC -shared -o $@ src/ftd3xx_unix.c -I$(FTDI) -L$(FTDI) -lftd3xx -lpthread -ldl '-Wl,-rpath,$$ORIGIN'
 
 # Test tool: loads imec's API and asks it what SpikeGLX asks (see README).
 $(BUILD)/np_probe.exe: tools/np_probe.c | $(BUILD)
