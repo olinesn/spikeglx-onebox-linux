@@ -9,11 +9,11 @@ Windows SpikeGLX under [Wine](https://www.winehq.org/), and replaces one Windows
 On Arm, [Box64](https://github.com/ptitSeb/box64) runs the x86-64 code.
 
 > **Status: experimental, not supported by imec, HHMI/Janelia (SpikeGLX) or FTDI.**
-> It recorded 2 hours without a problem on an Arm machine with **FTDI's library 1.1.8**
-> (below). With FTDI's 1.1.0, streaming stops after a few minutes
+> With **FTDI's library 1.1.8** it recorded 2 hours without a problem on an Arm machine, and
+> 10 minutes on x86-64 (below). With FTDI's 1.1.0, streaming stops after a few minutes
 > ([Known problems](#known-problems)). Test it on your own setup before you rely on it.
 
-## What was tested (2026-11-20 and 21)
+## What was tested (2026-11-20 to 23)
 
 | | x86-64 | Arm |
 |---|---|---|
@@ -21,16 +21,16 @@ On Arm, [Box64](https://github.com/ptitSeb/box64) runs the x86-64 code.
 | OS | Ubuntu 24.04, kernel 7.0 | Ubuntu 24.04 (L4T R39.2), kernel 6.8-tegra |
 | Wine | WineHQ 11.0 stable (unpacked, no root) | same, under Box64 |
 | SpikeGLX | v20261020 (API4), imec API 4.1.3, `SpikeGLX_NISIM.exe` | same |
-| FTDI library | D3XX for Linux 1.1.0, x86-64 | **1.1.8**, x86-64 (it runs inside the emulated process); earlier 1.1.0 |
+| FTDI library | **1.1.8**, x86-64; earlier 1.1.0 | **1.1.8**, x86-64 (it runs inside the emulated process); earlier 1.1.0 |
 | Hardware | OneBox (NPOB_ACQ_00-05-04, firmware 4.0.240), headstage NPM_HS_31, probe NP2013 (NP 2.0, four shanks) | same OneBox, behind a USB 3 hub |
-| Stream | 30,001 samples/s over 10 s; 2 min 10 s run, no errors | **30,000 samples/s for 2 hours** (every 10-minute reading 29,990–30,008) |
-| Recording | 30.7 s `.ap.bin`/`.meta`: size = samples × 385 channels × 2 bytes exactly, all 384 channels live, no zero rows | **2 h 0 min 17 s** (167 GB): size = 216,498,633 samples × 385 × 2 bytes exactly; all 384 channels live at the start, middle and end; no zero rows in a sample of 1 row every 0.1 s |
-| Memory over 2 hours | not run | FTDI's library: 15 MB, flat. SpikeGLX: 1.06–1.11 GB |
+| Stream | **30,000 samples/s for 10 minutes** (every 30-second reading 29,991–30,008) | **30,000 samples/s for 2 hours** (every 10-minute reading 29,990–30,008) |
+| Recording | 9 min 55 s (13.7 GB): size = samples × 385 channels × 2 bytes exactly; all 384 channels live at the start, middle and end; no zero rows in a sample of 1 row every 10 ms | **2 h 0 min 17 s** (167 GB): size = 216,498,633 samples × 385 × 2 bytes exactly; all 384 channels live at the start, middle and end; no zero rows in a sample of 1 row every 0.1 s |
+| Memory | over 10 minutes: FTDI's library 14 MB, flat; SpikeGLX 0.61 GB, flat | over 2 hours: FTDI's library 15 MB, flat; SpikeGLX 1.06–1.11 GB |
 | SpikeGLX CPU (graphs on) | 10–20 % of one core | 50–70 % of one core |
 
-The 2-hour run used our lab copy of the bridge (the same transfer path, plus experimental modes
-left out here). This repository's own build then recorded 3 minutes on the Arm machine with the
-same checks. On x86-64 the bridge builds against 1.1.8, but has not yet run with it on the OneBox.
+The x86-64 run used this repository's build. The 2-hour run used our lab copy of the bridge (the
+same transfer path, plus experimental modes left out here); this repository's own build then
+recorded 3 minutes on the Arm machine with the same checks.
 Not tested yet: two probes, the OneBox's own analog/digital channels, and the sync input.
 PXI basestations are **not** covered (they need a Windows PCIe kernel driver).
 
@@ -168,6 +168,11 @@ recordings, watch the stream's sample count (for example
   (`serial "" desc ""`), the OneBox's USB link is stuck. That can happen after SpikeGLX was
   killed during a transfer. Close SpikeGLX and run `python3 tools/onebox_reset.py`, which resets
   the link as unplugging and replugging would.
+- **SpikeGLX needs a screen**, even when you start it over ssh and drive it only through the
+  command server. Without one it hangs at startup (Wine logs `nodrv_CreateWindow`). Start it
+  from a logged-in desktop, or over ssh with that desktop's `DISPLAY` (and `XAUTHORITY`) set.
+  On a machine nobody logs in to, give it a virtual display, such as Xvfb or an Xorg virtual
+  monitor.
 - `FTD3XX_SHIM_STATS=60` (with `FTD3XX_SHIM_LOG`) logs a line of transfer counters, the FTDI
   library's heap and the process memory every 60 s.
 - One `FT_GetOverlappedResult ... = 19` (timeout) during Detect is normal; it happens before the run.
